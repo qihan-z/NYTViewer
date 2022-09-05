@@ -1,0 +1,305 @@
+---
+title: "NYTViewer"
+author: "QiHan Zhao"
+date: '2022-09-05'
+output:
+  pdf_document: default
+  html_document: default
+runtime: shiny
+---
+
+```{r librarySetup}
+library(tidyverse)
+library(httr2)
+library(jsonlite)
+library(glue)
+```
+
+### Task 1 - Figuring out the NY Times Article Search API
+
+```
+https://api.nytimes.com/svc/search/v2/articlesearch.json?
+```
+
+* `begin_date=20190905`
+
+* `end_date=20190905`
+
+* `fq=document_type:article+AND+print_page:1+AND+print_section:A`
+
+* `page=0`
+
+<br/>    
+
+```{r api_task1}
+api.key <- "zNCIxN6GzTKA4UZ2rhuaktGqMuYmgwOX"
+api <- "https://api.nytimes.com/svc/search/v2/articlesearch.json?"
+date <- "20190905"
+pageNum <- 0
+test_json <- jsonlite::read_json(
+  glue::glue(
+    "https://api.nytimes.com/svc/search/v2/articlesearch.json?fq=document_type:article+AND+print_page:1+AND+print_section:A&begin_date={date}&end_date={date}&page={pageNum}&api-key={api.key}"
+  )
+)
+```
+
+
+### Task 2 - Getting data from the NY Times Article Search API
+For this task, I started off writing the abstractions: laying out the important
+event handlers for the main function get_nyt_articles(), and then writing out the 
+code for each function (they are also in sequential order that is aligned with the 
+order I wrote them). Because we need to first check whether the passed-in month, 
+day arguments are in valid range, I wrote a simple boolean function to do that
+for me; I did not use the stopifnot() function because I thought the way I titled
+my function is more informative and readable in the context of a if statement.
+Then, I wrote a function that formats year, month, day into usable string format
+for the API argument begin_date & end_date; I tried to use a different API argument, 
+which would not require me to format the dates but using it returns unwanted headlines; 
+I suspected that it was because that argument also required a time stamp value so 
+I sticked with using the begin_date & end_date. After that, I wrote a function that
+handles the requesting and downloading matched json file. I used response\$meta\$hits
+to check how many total hits there are and whether the function can terminate after 
+current page download; at the end of the repeat loop, I also called Sys.sleep(6) 
+to space out the API calls to comply with the requirement of not sending requests
+too frequently. My last helper function is a data wrangling function that helps 
+me to clean the downloaded json files into a dataframe with relevant columns, per
+the github instruction, such as byline, headline, and webURL etc. In the end, I 
+called each of the helper function inside the get_nyt_articles() function. The
+function first checks whether month, day are in the valid range; if they are not, 
+an informative message is printed in the console. Then the function proceeded to 
+make API requests and download the json files. If the request has no hits, the 
+function returns NULL and a cleaned dataframe of the downloaded file otherwise. 
+```{r}
+# @param: checked argument, lower bound, upper bound
+# @return: whether the argument is in valid range
+arg_not_between <- function(val, low, high){
+  if ((low <= val && val <= high)) {
+    return (FALSE)
+  }
+  return (TRUE)
+}
+# @param: year, month, day
+# @return: date in string format usable for the API call
+#         for example: 2019/2/15 -> 20190215
+format_date_entry <- function(year, month, day) {
+  if (month < 10) {
+    MONTH <- paste0("0", month)
+  } else {
+    MONTH <- month
+  }
+  if (day < 10) {
+    DAY <- paste0("0", day)
+  } else {
+    DAY <- day
+  }
+    
+  return (paste0(year, MONTH, DAY))
+}
+# @param: date, API key
+# @return: matched NYT articles in json file (nested list)
+nyt_api_req <- function(date, api_key) {
+  tbl <- list()
+  page <- 0
+  # initialize the number of hits left to an arbitrary number
+  documentsLeft <- 10
+  repeat {
+    cat("Downloading Page ", page, "\n")
+    resp <- jsonlite::read_json(
+      glue::glue("https://api.nytimes.com/svc/search/v2/articlesearch.json?fq=document_type:article+AND+print_page:1+AND+print_section:A&begin_date={date}&end_date={date}&page={page}&api-key={api_key}")
+    )
+    if (page == 0) {
+      documentsLeft = resp$response$meta$hits
+    }
+    # check how many documents are left
+    documentsLeft = documentsLeft - length(resp$response$docs)
+    # update the users on the download status
+    cat("Articles downloaded:  ", length(resp$response$docs), "\n")
+    cat("Articles left:  ", documentsLeft, "\n")
+    tbl <- c(tbl, resp)
+    
+    if (documentsLeft <= 0) {
+      break
+    }
+    page <- page + 1
+    Sys.sleep(6)
+  }
+  tbl
+}
+wrangling_nyt_json <- function(df) {
+  return (df %>%
+    tibble() %>%
+    tidyr::unnest_wider(., .) %>%
+    select(docs) %>%
+    filter(
+      !purrr::map_lgl(docs, is.null)
+    ) %>%
+    tidyr::unnest_longer(docs) %>%
+    tidyr::hoist(
+      docs,
+      webURL = "web_url",
+      headline = c("headline", "main"),
+      lead_paragraph = "lead_paragraph",
+      byline = c("byline", "original"),
+      source = "source"
+    ))
+}
+get_nyt_articles = function(year, month, day, 
+                            api_key = "zNCIxN6GzTKA4UZ2rhuaktGqMuYmgwOX") {
+  if(arg_not_between(as.integer(month), 1, 12)) stop("Month is not in valid range!")
+  if(arg_not_between(as.integer(day), 1, 31)) stop("Day is not in valid range!")
+  
+  DATE <- format_date_entry(as.integer(year), as.integer(month), as.integer(day))
+  
+  APIdata_in_json <- nyt_api_req(DATE, api_key)
+  if(APIdata_in_json$response$meta$hits == 0) {
+    return (NULL) 
+  }
+  
+  final.df <- wrangling_nyt_json(APIdata_in_json)
+  final.df
+}
+```
+
+<br/>
+
+### Task 3 - Shiny Front End
+In task3, I used text input box UI for users to enter their desired date, which 
+is then converted to integers before passed into the API request functions. The
+default values for the dates is my birthday when I entered college, and I also
+added a Request action button that would trigger the API request when the user
+clicked it. Once the button is clicked, the get_nyt_articles() function from 
+Task 2 is called to download matched headlines; I wrapped the download function
+into withProgress(), which would update the users on what the App is doing. If
+no headline exists on thatdate the App will display a message box that prompts 
+the user to try a different date. To format the matched headlines, I wanted to 
+turn each headline into an actionlink, embedded in a rendered dataframe for 
+aeshtetic purpose, that would trigger a modal dialog box upon being clicked. In 
+order to achieve this, I searched up ways to inporcorate JavaScript lines to 
+my shiny functions because I thought this functionality might be beyond the ability
+of Shiny and thus entailed the use of JavaScript. Eventually I found a code on
+StackOverflow that achieves what I planned to do(https://stackoverflow.com/questions/45739303/r-shiny-handle-action-buttons-in-data-table). 
+This approach is convenient because, to some extent, it saves me from the process
+of creating observers for each headline since all of the headline can then
+be accessed through one "input id"--that is, input$select_headline--, and yet
+each actionlink still has its headline as its unique id that can be used to 
+filter for matched dataframe row to create popup modal dialog box. After I implemented
+this feature, I wrote a observer that creates a popup modal dialog box based on 
+which headline the users clicked; I passed in some CSS values to center the action
+button that would take the user to the actual article in the modal dialog box. 
+
+
+```{r}
+library(shiny)
+shinyApp(
+  ui = fluidPage(
+    titlePanel("NYTimes API"),
+    sidebarLayout(
+      sidebarPanel(
+        h4("Request For Publication on this date"),
+        textInput("year", "Year", value = 2019),
+        textInput("month", "Month", value = 9),
+        textInput("day", "Day", value = 5),
+        h4("Enter Your API key (if applicable)"),
+        textInput("APIKEY", ""),
+        actionButton("requestData", "Request")
+      ),
+      mainPanel(
+        DT::dataTableOutput("headlineTbl")
+      )
+    )
+  ),
+  server = function(input, output, session) {
+    
+    HeadlineToLink <- function(headlines){
+      
+      # this function turned into the action link UI into strings
+      # which will then be rendered as vanilla actionlink when the App runs. 
+      # Passed in the javascript function at the end, so that I can access which 
+      # actionlink is pressed through input$select_headline, which returns the id
+      # of each actionlink (which is set to be its headline)
+      # CODE REFERENCE: https://stackoverflow.com/questions/45739303/r-shiny-handle-action-buttons-in-data-table
+      HL.list <- character(length(headlines))
+      for (i in seq_len(length(headlines))) {
+        HL.list[i] <- as.character(actionLink(paste0(headlines[i]), 
+                                              paste0(headlines[i]),
+                                              onClick = 'Shiny.onInputChange(\"select_headline\",  this.id)'))
+      }
+      HL.list
+    }
+    state = reactiveValues(
+      observers = list()
+    )
+    
+    request.data = reactiveValues(tbl = NULL)
+    
+    download_api_data <- function(){
+      if(input$APIKEY != "") {
+        request.data$tbl <- get_nyt_articles(input$year,
+                                             input$month,
+                                             input$day,
+                                             api_key = input$APIKEY)
+      } else {
+        request.data$tbl <- get_nyt_articles(input$year,
+                                             input$month,
+                                             input$day)
+      }
+    }
+    # @return: dataframe with infomation on byline, title, paragraph of 
+    #          selected headline
+    extractDataRow <- function(hl) {
+      req(request.data$tbl)
+      
+      request.data$tbl %>% 
+        filter(headline == hl)
+    }
+    observeEvent(input$requestData, {
+      
+      # Progress bar that updates the user on the current process of the function
+      withProgress(message = "Loading", value = 0, {
+        incProgress(0.3, detail = "Requesting & Downloading API data")
+        download_api_data()
+        if (is.null(request.data$tbl)) {
+          incProgress(0.7, detail = "")
+          showNotification("It seems that your request has no hits, Please change a date",
+                           type = "message",
+                           duration = 2)
+        } else{
+          incProgress(0.5, detail = "Rendering Headline Table")
+          request.data$headline <- data.frame(
+            date = paste0(input$year, "/", input$month, "/", input$day),
+            headlines = HeadlineToLink(request.data$tbl$headline)
+            )
+          Sys.sleep(1)
+        }
+      })
+      
+      # set escape to FALSE so that the actionLink UI string is rendered instead
+      # of treating as actual string contents
+      output$headlineTbl <- DT::renderDataTable(
+        request.data$headline, server = FALSE, escape = FALSE, selection = 'none'
+        )
+    })
+    
+    # create the modal dialog box based on the headline that the user clicked
+    # input$select_headline gives the headline that they click and is used to
+    # matched the correct row inside the NYT articles dataframe, which is then used
+    # to create the modal dialog box. 
+    # at the end, use CSS to center the action button
+    observeEvent(input$select_headline, {
+      request.data$selectedHL <- extractDataRow(input$select_headline)
+      showModal(modalDialog(
+        h4("Title"),
+        p(request.data$selectedHL$headline),
+        h4("Byline"),
+        em(request.data$selectedHL$byline),
+        h4("A peek on the content"),
+        p(request.data$selectedHL$lead_paragraph),
+        div(actionButton("ToSource", "I want to read it",
+                     onClick = paste0("window.open('", 
+                                      request.data$selectedHL$webURL,
+                                      "')")), style = "display: flex; align-items: center; justify-content:center;")
+      ))
+    })
+  }
+)
+```
